@@ -1,34 +1,8 @@
-import React, { useState, useEffect } from 'react';
-import { SiweMessage } from 'siwe';
-import { ethers } from 'ethers';
+import React, { useState } from 'react';
 import './App.css';
-
-// Simple in-memory auth mock (replace later with real backend / JWT)
-const useAuth = () => {
-  const [user, setUser] = useState(null);
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem('ck_user');
-      if (saved) setUser(JSON.parse(saved));
-    } catch (e) {
-      console.warn('Failed to load user from storage', e);
-    }
-  }, []);
-  const login = (email, org) => {
-    const u = { email, org, loggedInAt: Date.now() };
-    try {
-      localStorage.setItem('ck_user', JSON.stringify(u));
-    } catch (e) {
-      console.warn('Failed to persist user', e);
-    }
-    setUser(u);
-  };
-  const logout = () => {
-    try { localStorage.removeItem('ck_user'); } catch(_) {}
-    setUser(null);
-  };
-  return { user, login, logout };
-};
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { ethers } from 'ethers';
+import { SiweMessage } from 'siwe';
 
 const NavItem = ({ label, active, onClick }) => (
   <button
@@ -37,7 +11,7 @@ const NavItem = ({ label, active, onClick }) => (
   >{label}</button>
 );
 
-const Layout = ({ current, setCurrent, logout, org, walletAddress, sessionId }) => {
+const Layout = ({ current, setCurrent, logout, org }) => {
   const items = ['Dashboard','Payments','Batch','Files','Billing','Developers','Settings'];
   return (
     <div className="ck-layout">
@@ -53,7 +27,7 @@ const Layout = ({ current, setCurrent, logout, org, walletAddress, sessionId }) 
         <button className="ck-logout" onClick={logout}>Logout</button>
       </aside>
       <main className="ck-main">
-        <Header title={current} walletAddress={walletAddress} sessionId={sessionId} />
+        <Header title={current} />
         <div className="ck-content">
           <Section name={current} />
         </div>
@@ -62,21 +36,11 @@ const Layout = ({ current, setCurrent, logout, org, walletAddress, sessionId }) 
   );
 };
 
-const Header = ({ title, walletAddress, sessionId }) => (
-  <div className="ck-header" style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:'1rem'}}>
-    <h1 style={{margin:0}}>{title}</h1>
-    <div style={{display:'flex',alignItems:'center',gap:'1rem'}}>
-      {sessionId && (
-        <div style={{fontSize:'.55rem',letterSpacing:'.08em',textTransform:'uppercase',color:'#64748b'}}>Session: <span style={{color:'#334155'}}>{sessionId.slice(0,8)}</span></div>
-      )}
-      {walletAddress && (
-        <div className="ck-wallet-pill">{shorten(walletAddress)}</div>
-      )}
-    </div>
+const Header = ({ title }) => (
+  <div className="ck-header">
+    <h1>{title}</h1>
   </div>
 );
-
-const shorten = (addr) => addr ? addr.slice(0,6)+'…'+addr.slice(-4) : '';
 
 // Placeholder content components
 const Section = ({ name }) => {
@@ -184,78 +148,97 @@ const Panel = ({ title, children }) => (
   </div>
 );
 
-const Login = ({ onLogin }) => {
-  const [email,setEmail] = useState('');
-  const [org,setOrg] = useState('');
-  const [ethStatus,setEthStatus] = useState('idle'); // idle | connecting | signing
-  const [ethError,setEthError] = useState(null);
-  const submit = e => { e.preventDefault(); if(!email||!org) return; onLogin(email,org); };
+const Login = () => {
+  const { signInWithWallet } = useAuth();
+  const [address, setAddress] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  const handleEthSignIn = async () => {
-    setEthError(null);
-    if(!window.ethereum){ setEthError('No wallet found. Install MetaMask.'); return; }
+  const connectWallet = async () => {
+    if (!window.ethereum) {
+      alert('MetaMask not installed');
+      return;
+    }
     try {
-      setEthStatus('connecting');
       const provider = new ethers.BrowserProvider(window.ethereum);
+      console.log('Provider created:', provider);
       const accounts = await provider.send('eth_requestAccounts', []);
+      console.log('Accounts:', accounts);
       const address = ethers.getAddress(accounts[0]);
-      setEthStatus('signing');
-      const nonce = Math.random().toString(36).slice(2,10);
+      console.log('Address from accounts:', address);
+      const signer = await provider.getSigner(address);
+      console.log('Signer obtained:', signer);
+      // No need for await signer.getAddress(), use the address directly
       const network = await provider.getNetwork();
-      const siwe = new SiweMessage({
-        domain: window.location.host,
-        address,
-        statement: 'Sign in to CoinKeep Business Dashboard',
-        uri: window.location.origin,
-        version: '1',
-        chainId: network.chainId,
-        nonce
-      });
-      const signer = await provider.getSigner();
-      const messageToSign = siwe.prepareMessage();
-      const signature = await signer.signMessage(messageToSign);
-      const sessionId = 'sess_' + crypto.randomUUID();
-      // Simulated backend call placeholder (would POST to /api/session)
+      const chainId = Number(network.chainId);
+      console.log('Chain ID:', chainId);
+      setAddress(address);
+
+      // Create SIWE message
+      let message;
       try {
-        // await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ sessionId, address, signature, message: messageToSign })});
+        message = new SiweMessage({
+          domain: window.location.host,
+          address,
+          statement: 'Sign in to CoinKeep with Ethereum.',
+          uri: window.location.origin,
+          version: '1',
+          chainId,
+          nonce: Math.random().toString(36).substring(2),
+        });
+        const messageText = message.prepareMessage();
+        console.log('SIWE message:', messageText);
+        const signature = await signer.signMessage(messageText);
+        console.log('Signature obtained');
+
+        setLoading(true);
+        await signInWithWallet(address, signature, messageText);
+        console.log('Login successful');
       } catch (e) {
-        console.warn('Failed to send session to backend (placeholder)', e);
+        console.error('SIWE error:', e);
+        alert('SIWE error: ' + e.message);
+        return;
       }
-      localStorage.setItem('ck_user', JSON.stringify({ address, signature, sessionId, siwe: messageToSign, loggedInAt: Date.now() }));
-      onLogin(address + '@eth.local', 'Wallet Org');
-    } catch (e) {
-      setEthError(e.message);
+    } catch (error) {
+      console.error('Detailed login error:', error);
+      let errorMessage = 'Unknown error';
+      if (error.message) {
+        errorMessage = error.message;
+      } else if (error.response && error.response.data && error.response.data.error) {
+        errorMessage = error.response.data.error;
+      }
+      alert(`Login failed: ${errorMessage}`);
     } finally {
-      setEthStatus('idle');
+      setLoading(false);
     }
   };
 
   return (
     <div className="ck-auth-wrapper">
-      <form className="ck-auth-form" onSubmit={submit}>
+      <div className="ck-auth-form">
         <h1>Sign in to CoinKeep</h1>
-        <label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)} required /></label>
-        <label>Organization Name<input value={org} onChange={e=>setOrg(e.target.value)} required /></label>
-        <button type="submit" className="ck-primary-btn">Continue</button>
-        <div className="ck-divider"><span>OR</span></div>
-        <button type="button" className="ck-eth-btn" onClick={handleEthSignIn} disabled={ethStatus!== 'idle'}>
-          {ethStatus==='idle' && 'Sign in with Ethereum'}
-          {ethStatus==='connecting' && 'Connecting Wallet…'}
-          {ethStatus==='signing' && 'Signing Message…'}
+        <button onClick={connectWallet} disabled={loading}>
+          {loading ? 'Signing in...' : 'Connect Wallet'}
         </button>
-        {ethError && <div className="ck-err-msg">{ethError}</div>}
-        <p className="ck-auth-note">Prototype. Email is mock; Ethereum uses a message signature (no gas).</p>
-      </form>
+        {address && <p>Connected: {address}</p>}
+        <p className="ck-auth-note">Connect your Ethereum wallet to login.</p>
+      </div>
     </div>
   );
 };
 
-function App() {
-  const { user, login, logout } = useAuth();
+const AppInner = () => {
+  const { user, logout } = useAuth();
   const [current, setCurrent] = useState('Dashboard');
-  if (!user) return <Login onLogin={login} />;
-  const parsed = user; // user already object with possible address & sessionId
-  return <Layout current={current} setCurrent={setCurrent} logout={logout} org={parsed.org || parsed.address} walletAddress={parsed.address} sessionId={parsed.sessionId} />;
+  if (!user) return <Login />;
+  return <Layout current={current} setCurrent={setCurrent} logout={logout} org={user.user_metadata?.address || 'Wallet User'} />;
+};
+
+function App() {
+  return (
+    <AuthProvider>
+      <AppInner />
+    </AuthProvider>
+  );
 }
 
 export default App;
